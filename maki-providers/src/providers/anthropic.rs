@@ -22,9 +22,14 @@ use crate::{
 };
 
 const API_VERSION: &str = "2023-06-01";
-const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODELS_URL: &str = "https://api.anthropic.com/v1/models?limit=1000";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const BETA_ADVANCED_TOOL_USE: &str = "advanced-tool-use-2025-11-20";
+
+fn anthropic_base_url() -> String {
+    env::var("ANTHROPIC_BASE_URL")
+        .map(|u| u.trim_end_matches('/').to_string())
+        .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+}
 
 /// Anthropic caches conversation by blocks (tools -> system -> messages).
 /// We use 1 cache breakpoint for the last tool block, and 1 for the system prompt.
@@ -202,19 +207,22 @@ pub(crate) fn models() -> &'static [ModelEntry] {
 }
 
 fn resolve_auth() -> Result<super::ResolvedAuth, AgentError> {
-    if let Ok(key) = env::var("ANTHROPIC_API_KEY") {
-        debug!("using API key authentication");
-        return Ok(super::ResolvedAuth {
-            base_url: Some("https://api.anthropic.com/v1/messages".into()),
-            headers: vec![
-                ("x-api-key".into(), key),
-                ("anthropic-beta".into(), BETA_ADVANCED_TOOL_USE.into()),
-            ],
-        });
-    }
+    let key = env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| AgentError::Config {
+            message: "set ANTHROPIC_API_KEY environment variable".into(),
+        })?;
 
-    Err(AgentError::Config {
-        message: "set ANTHROPIC_API_KEY environment variable".into(),
+    debug!("using API key authentication");
+    let messages_url = format!("{}/v1/messages", anthropic_base_url());
+    Ok(super::ResolvedAuth {
+        base_url: Some(messages_url),
+        headers: vec![
+            ("x-api-key".into(), key),
+            ("anthropic-beta".into(), BETA_ADVANCED_TOOL_USE.into()),
+        ],
     })
 }
 
@@ -337,7 +345,8 @@ impl Anthropic {
 
     fn build_request(&self, method: &str, url: Option<&str>) -> isahc::http::request::Builder {
         let auth = self.auth.lock().unwrap();
-        let url = url.unwrap_or_else(|| auth.base_url.as_deref().unwrap_or(MESSAGES_URL));
+        let fallback = format!("{}/v1/messages", anthropic_base_url());
+        let url = url.unwrap_or_else(|| auth.base_url.as_deref().unwrap_or(&fallback));
         let mut builder = Request::builder()
             .method(method)
             .uri(url)
@@ -371,9 +380,10 @@ impl Anthropic {
     async fn do_list_models(&self) -> Result<Vec<String>, AgentError> {
         let mut models = Vec::new();
         let mut after_id: Option<String> = None;
+        let models_base = format!("{}/v1/models?limit=1000", anthropic_base_url());
 
         loop {
-            let mut url = MODELS_URL.to_string();
+            let mut url = models_base.clone();
             if let Some(cursor) = &after_id {
                 url.push_str(&format!("&after_id={cursor}"));
             }
@@ -468,6 +478,7 @@ struct ModelInfo {
 #[derive(Deserialize)]
 struct ModelsPage {
     data: Vec<ModelInfo>,
+    #[serde(default)]
     has_more: bool,
     last_id: Option<String>,
 }

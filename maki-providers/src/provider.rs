@@ -94,8 +94,12 @@ impl ProviderKind {
         }
     }
 
-    pub const fn accepts_arbitrary_models(self) -> bool {
-        matches!(self, Self::Ollama)
+    pub fn accepts_arbitrary_models(self) -> bool {
+        match self {
+            Self::Ollama => true,
+            Self::Anthropic => std::env::var("ANTHROPIC_BASE_URL").is_ok(),
+            _ => false,
+        }
     }
 
     pub fn create(self, timeouts: Timeouts) -> Result<Box<dyn Provider>, AgentError> {
